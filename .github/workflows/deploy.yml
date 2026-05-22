@@ -1,0 +1,62 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build (Vite)
+        env:
+          VITE_API_URL: /api
+        run: npm run build
+
+      - name: Prepare SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            echo "::error::chiave SSH malformata"
+            exit 1
+          fi
+          ssh-keyscan -4 -T 15 -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy (rsync)
+        env:
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          REMOTE_DIR: /var/www/myapp/
+        run: |
+          rsync -avz --delete \
+            -e "ssh -4 -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            dist/ \
+            "$VPS_USER@$VPS_HOST:$REMOTE_DIR"
+
+      - name: Verify
+        run: |
+          HTTP_CODE=$(curl -fsS -o /dev/null -w "%{http_code}" https://myapp.zaknafein.ovh/ || echo "fail")
+          echo "HTTP $HTTP_CODE"
+          [ "$HTTP_CODE" = "200" ] || { echo "::error::Atteso 200, ottenuto $HTTP_CODE"; exit 1; }
